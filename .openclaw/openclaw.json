@@ -1,0 +1,72 @@
+{
+  "$schema": "https://openclaw.ai/schema.json",
+  "gateway": {
+    "port": 18789,
+    "host": "0.0.0.0",
+    "auth": {
+      "token": "IXH1Q4mNnZ4hAEAdVwuuZKG5IZ8lwSbDj40e5QoeLKE"
+    }
+  },
+  "models": {
+    "providers": {
+      "minimax": {
+        "type": "openai",
+        "apiKey": "${MINIMAX_API_KEY}",
+        "baseURL": "https://api.minimaxi.com/v1"
+      }
+    },
+    "defaults": {
+      "provider": "minimax",
+      "model": "MiniMax-M2.7"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "MiniMax-M2.7",
+      "workspace": "~/.openclaw/workspace",
+      "thinking": {
+        "budget": 16000
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "dmPolicy": "pairing",
+      "allowFrom": ["${TELEGRAM_ALLOWED_USER_ID}"]
+    }
+  },
+  "tools": {
+    "browser": {
+      "enabled": true,
+      "playwright": {
+        "headless": true,
+        "args": [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-blink-features=AutomationControlled"
+        ],
+        "userAgent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+      }
+    },
+    "sessions": {
+      "enabled": true
+    },
+    "cron": {
+      "enabled": true
+    }
+  },
+  "logging": {
+    "level": "info",
+    "file": "~/.openclaw/logs/gateway.log"
+  },
+  "env": {
+    "MINIMAX_API_KEY": "sk-cp-BcbH2nSRvdE2UIre4CjFNTMDDrn7K4NtFosQBfJ76HRy5RtC4ptsm_ehRR1G2YzhRIDu66aEEiI5RQoH_MMajgIqK_mwqMXChO-2eIa7EckxFvfk9UWoXdc",
+    "TELEGRAM_BOT_TOKEN": "8612653411:AAE_KvNbuxIBeBP_uocTWaN3xlOBpqiva3k",
+    "TELEGRAM_ALLOWED_USER_ID": "",
+    "CRYPTOTASK_EMAIL": "rom.godinho@gmail.com",
+    "CRYPTOTASK_PASSWORD": "6yVb7HJX7pTfQ9V"
+  }
+}
