@@ -1,130 +1,148 @@
 #!/usr/bin/env python3
 """
-OpenClaw CryptoTask Agent - Cron-driven freelance agent
-Runs via cron to browse cryptotask.org and notify via Telegram.
-Uses direct MiniMax API calls + Telegram bot.
+OpenClaw CryptoTask Agent - Camfox browser + MiniMax + Telegram
+Runs via cron every 4 hours to browse cryptotask.org and notify via Telegram.
+Uses subprocess curl for HTTP (more reliable than urllib on Python 3.13).
 """
-
-import subprocess
-import json
-import sys
+import subprocess, json, sys, os, time
 from datetime import datetime
 
-TELEGRAM_BOT_TOKEN = "8612653411:AAE_KvNbuxIBeBP_uocTWaN3xlOBpqiva3k"
-TELEGRAM_CHAT_ID = "6793940199"
-MINIMAX_API_KEY = "sk-cp-BcbH2nSRvdE2UIre4CjFNTMDDrn7K4NtFosQBfJ76HRy5RtC4ptsm_ehRR1G2YzhRIDu66aEEiI5RQoH_MMajgIqK_mwqMXChO-2eIa7EckxFvfk9UWoXdc"
-MINIMAX_BASE_URL = "https://api.minimax.io/v1"
+BOT = "8612653411:AAE_KvNbuxIBeBP_uocTWaN3xlOBpqiva3k"
+CHAT = "6793940199"
+KEY = "sk-cp-BcbH2nSRvdE2UIre4CjFNTMDDrn7K4NtFosQBfJ76HRy5RtC4ptsm_ehRR1G2YzhRIDu66aEEiI5RQoH_MMajgIqK_mwqMXChO-2eIa7EckxFvfk9UWoXdc"
+BASE = "https://api.minimax.io/v1"
+CAMFOX = "http://127.0.0.1:9377"
 
-def send_telegram(msg: str) -> bool:
-    """Send message via Telegram bot."""
-    import urllib.request
-    import urllib.parse
-    data = urllib.parse.urlencode({
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": msg,
-        "parse_mode": "Markdown"
-    })
+def curl(method, url, data=None, timeout=30):
+    """Call HTTP endpoint via subprocess curl."""
+    cmd = ["curl", "-s", "-X", method, url]
+    if data:
+        cmd += ["-d", json.dumps(data), "-H", "Content-Type: application/json"]
     try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data=data.encode()
-        )
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read()).get("ok", False)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0 and result.stdout:
+            return json.loads(result.stdout)
     except Exception as e:
-        print(f"Telegram error: {e}")
-        return False
+        pass
+    return None
 
-def call_minimax(prompt: str, max_tokens: int = 500) -> str:
-    """Call MiniMax API directly."""
-    import urllib.request
-    data = json.dumps({
+def send(msg):
+    data = {"chat_id": CHAT, "text": msg, "parse_mode": "Markdown"}
+    r = curl("POST", f"https://api.telegram.org/bot{BOT}/sendMessage", data)
+    return r.get("ok") if r else False
+
+def ai(prompt, tokens=500):
+    data = {
         "model": "MiniMax-M2.7",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens
-    }).encode()
-    req = urllib.request.Request(
-        f"{MINIMAX_BASE_URL}/chat/completions",
-        data=data,
-        headers={
-            "Authorization": f"Bearer {MINIMAX_API_KEY}",
-            "Content-Type": "application/json"
-        }
-    )
+        "max_tokens": tokens
+    }
+    headers = ["-H", f"Authorization: Bearer {KEY}", "-H", "Content-Type: application/json"]
+    cmd = ["curl", "-s", "-X", "POST", f"{BASE}/chat/completions", "-d", json.dumps(data)] + headers
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            resp = json.loads(r.read())
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        if result.returncode == 0:
+            resp = json.loads(result.stdout)
             return resp["choices"][0]["message"]["content"]
     except Exception as e:
         return f"Error: {e}"
+    return "Error: no response"
+
+def camfox_req(method, path, data=None):
+    url = f"{CAMFOX}{path}"
+    return curl(method, url, data, timeout=30)
+
+def create_tab():
+    r = camfox_req("POST", "/tabs", {"userId": "cryptotask-agent", "sessionKey": "job-scan"})
+    return r.get("tabId") if r else None
+
+def close_tab(tabId):
+    if tabId:
+        camfox_req("DELETE", f"/tabs/{tabId}?userId=cryptotask-agent")
+
+def browse_and_snapshot(url, scroll=0):
+    tabId = create_tab()
+    if not tabId:
+        return None, None, "Failed to create tab"
+    
+    r = camfox_req("POST", f"/tabs/{tabId}/navigate", {"userId": "cryptotask-agent", "url": url})
+    if r and r.get("error"):
+        close_tab(tabId)
+        return None, None, r.get("error")
+    
+    time.sleep(4)
+    if scroll:
+        camfox_req("POST", f"/tabs/{tabId}/scroll", {"userId": "cryptotask-agent", "direction": "down", "amount": scroll})
+        time.sleep(1)
+    
+    snap = camfox_req("GET", f"/tabs/{tabId}/snapshot?userId=cryptotask-agent")
+    links_r = camfox_req("GET", f"/tabs/{tabId}/links?userId=cryptotask-agent&limit=30")
+    links = links_r.get("links", []) if links_r else []
+    close_tab(tabId)
+    
+    return snap.get("snapshot", "") if snap else "", links, None
 
 def main():
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
-    if len(sys.argv) < 2:
-        print("Usage: cryptotask-agent.py [browse|status|apply]")
-        sys.exit(1)
-    
-    action = sys.argv[1]
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    action = sys.argv[1] if len(sys.argv) > 1 else "status"
     
     if action == "status":
-        send_telegram(f"✅ *CryptoTask Agent Alive*\n\n{timestamp}\n\nOpenClaw + MiniMax + Telegram pipeline operational.")
-        print("Status sent")
-        
-    elif action == "browse":
-        send_telegram(f"🔍 *Job Scan Started*\n\n{timestamp}\n\nScanning cryptotask.org for relevant positions...")
-        
-        prompt = """You are an expert freelance job analyst. Browse these cryptotask.org job categories and identify the BEST opportunities for a software development company (RGODIM LTD).
-
-Focus on jobs matching these skills:
-- Blockchain / Smart Contract / Web3
-- Backend / API Development
-- AI / Machine Learning
-- DevOps / System Administration
-- Data Engineering
-
-Return a JSON array of the top 5 most relevant jobs with:
-- Job title
-- Client name  
-- Budget (monthly or hourly)
-- Key skills required
-- Why it's a good match for RGODIM LTD
-- Apply link
-
-Only include non-design jobs. Format as clean markdown."""
-        
-        result = call_minimax(prompt, max_tokens=800)
-        
-        if result.startswith("Error:"):
-            send_telegram(f"❌ *Job Scan Failed*\n\n{result[:500]}")
+        r = camfox_req("GET", "/")
+        if r and r.get("ok"):
+            send(f"OK Claude Agent Alive {ts}")
+            send(f"Camfox: browser={r.get('browserRunning')} connected={r.get('browserConnected')}")
         else:
-            send_telegram(f"✅ *Job Scan Complete*\n\n{timestamp}\n\n{result[:3500]}")
+            send(f"Camfox error: {r}")
+    
+    elif action == "browse":
+        send(f"Job scan started {ts}\nBrowsing cryptotask.org...")
+        snapshot, links, err = browse_and_snapshot("https://cryptotask.org/en/tasks", scroll=800)
         
+        if err or not snapshot:
+            send(f"Scan failed: {err or 'no snapshot'}")
+            return
+        
+        links_text = "\n".join([f"- {l.get('href','')} {l.get('text','')[:50]}" for l in links[:15] if l.get('href')])[:2000]
+        
+        prompt = f"""You are a job analyst for RGODIM LTD (software dev company). Analyze this page from cryptotask.org:
+
+SNAPSHOT:
+{snapshot[:8000]}
+
+LINKS:
+{links_text}
+
+Identify the top 5 most relevant jobs. Focus: Blockchain, Backend, API, AI, DevOps, Data Engineering.
+Exclude: Design, Marketing, Writing jobs.
+
+Return markdown with: title, client, budget, skills, match reason, apply link. Max 5 jobs."""
+        
+        result = ai(prompt, 800)
+        send(f"Top Jobs for RGODIM LTD:\n\n{result[:3500]}")
+    
     elif action == "apply":
         if len(sys.argv) < 3:
-            send_telegram("Usage: apply <job_link>")
-            sys.exit(1)
-        job_link = sys.argv[2]
-        send_telegram(f"📝 *Applying to Job*\n\n{job_link}\n\nPreparing proposal...")
+            send("Usage: apply <job_link>"); sys.exit(1)
+        link = sys.argv[2]
+        send(f"Applying to: {link}\nBrowsing job...")
+        snapshot, _, err = browse_and_snapshot(link)
         
-        prompt = f"""You are a professional freelancer applying for jobs on behalf of RGODIM LTD (rom.godinho@gmail.com).
+        if err or not snapshot:
+            send(f"Failed to load: {err or 'no content'}")
+            return
+        
+        prompt = f"""Write a professional job proposal for RGODIM LTD (rom.godinho@gmail.com).
 
-Go to {job_link} and:
-1. Read the full job description
-2. Write a professional, compelling proposal
-3. Include: company introduction, relevant experience, proposed approach, pricing
+Job content:
+{snapshot[:6000]}
 
-Keep the proposal concise but impressive. Return the full proposal text."""
+Include: company intro, experience, proposed solution, pricing, timeline.
+Return full proposal text."""
         
-        result = call_minimax(prompt, max_tokens=1000)
-        
-        if result.startswith("Error:"):
-            send_telegram(f"❌ *Apply Failed*\n\n{result[:500]}")
-        else:
-            send_telegram(f"📝 *Proposal Ready*\n\n{job_link}\n\n{result[:3500]}")
+        result = ai(prompt, 1000)
+        send(f"Proposal for {link}:\n\n{result[:3500]}")
     
     else:
-        send_telegram(f"Unknown action: {action}")
+        send(f"Unknown action: {action}")
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
