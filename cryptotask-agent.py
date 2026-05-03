@@ -149,7 +149,17 @@ SKIP = ["design","logo","graphic","illustration","video","animation","photoshop"
     "illustrator","figma","ui/ux","ui design","ux design","content writing",
     "copywriting","blog post","article","data entry","excel","spreadsheet",
     "virtual assistant","seo","social media","marketing only","mobile app only",
-    "ios only","android only","swift","kotlin","react native","flutter"]
+    "ios only","android only","swift","kotlin","react native","flutter",
+    "artist","nft art","image training","image generation","illustration",
+    "voice over","video edit","music production","podcast","audio",
+    "3d model","3d design","blender","maya","zbrush","texturing","rigging",
+    "unreal","unity","game dev","gameplay","level design","npc","character artist",
+    "aircraft","mechanic","maintenance","repair technician","car","auto",
+    "cannabis","marijuana","adult","nsfw","crypto trading advice","trading signal",
+    "trading bot","signal provider","trading strategy only","webull","binance signal",
+    "copy trade","trading competition","marketing manager","social media manager",
+    "content creator","youtube","tiktok","instagram influencer","facebook ad",
+    "logo design","brand design","flyer","poster","banner design","mockup"]
 
 def keyword_score(title, desc=""):
     text = (title + " " + desc).lower()
@@ -464,7 +474,13 @@ def do_browse():
                 log(f"  Skip: {reason}")
                 skipped += 1
                 continue
-            
+
+            # Only apply to strong matches (score >= 5.5)
+            if score < 5.5:
+                log(f"  Low score ({score:.1f}), skipping")
+                skipped += 1
+                continue
+
             # Apply in fresh tab
             apply_tab, asid = new_tab(url, session=f"apply_{int(time.time())}")
             if not apply_tab:
