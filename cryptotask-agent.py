@@ -32,11 +32,13 @@ LOG_F     = os.path.join(BASE_DIR, "agent.log")
 SID       = "rgodim_agent"
 
 # ── Globals ──────────────────────────────────────────────────────────────────
-tab_id  = None   # Telegram polling tab
-tab_lock = Lock()
-last_browse = 0
+tab_id       = None   # Telegram polling tab
+tab_lock     = Lock()
+browse_lock  = Lock()  # Prevent concurrent browse threads
+browsing     = False   # Current browse state
+last_browse  = 0
 browse_interval = 4 * 3600  # 4 hours
-shutdown = False
+shutdown     = False
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def log(msg):
@@ -48,8 +50,11 @@ def log(msg):
             f.write(line + "\n")
     except: pass
 
-def curl(method, url, data=None, timeout=45):
+def curl(method, url, data=None, headers=None, timeout=45):
     cmd = ["curl", "-s", "-X", method, "--max-time", str(timeout), "-L"]
+    if headers:
+        for h in headers:
+            cmd += ["-H", h]
     if data:
         cmd += ["-d", json.dumps(data), "-H", "Content-Type: application/json"]
     cmd.append(url)
@@ -76,7 +81,8 @@ def ai(prompt, max_tokens=400):
         "temperature": 0.7
     }
     try:
-        resp = curl("POST", f"{BASE}/chat/completions", data, timeout=30)
+        headers = [f"Authorization: Bearer {KEY}", "Content-Type: application/json"]
+        resp = curl("POST", f"{BASE}/chat/completions", data, headers=headers, timeout=30)
         d = json.loads(resp)
         if "choices" in d and d["choices"]:
             return d["choices"][0]["message"]["content"].strip()
@@ -458,9 +464,22 @@ def cmd_status():
     tg(f"🤖 RGODIM LTD Agent\nCamfox: {'✅' if camfox_ok_val else '❌'}\nTime: {datetime.now():%H:%M}\n\n{last[:500]}")
 
 def cmd_browse():
-    tg("🚀 Scanning jobs now...")
-    # Run in thread so Telegram polling continues
-    Thread(target=do_browse, daemon=True).start()
+    global browsing
+    with browse_lock:
+        if browsing:
+            tg("⏳ Browse already in progress...")
+            return
+        browsing = True
+        tg("🚀 Scanning jobs now...")
+    Thread(target=_browse_thread, daemon=True).start()
+
+def _browse_thread():
+    global browsing
+    try:
+        do_browse()
+    finally:
+        with browse_lock:
+            browsing = False
 
 def cmd_apply(args):
     if not args:
@@ -577,10 +596,15 @@ def watchdog():
             # Periodic browse every 4 hours
             now = time.time()
             if now - last_browse > browse_interval:
-                log("Periodic browse...")
-                tg("🔄 Auto job scan (4h interval)")
-                Thread(target=do_browse, daemon=True).start()
-                last_browse = now
+                with browse_lock:
+                    if browsing:
+                        log("Browse already running, skipping periodic")
+                    else:
+                        browsing = True
+                        log("Periodic browse...")
+                        tg("🔄 Auto job scan (4h interval)")
+                        Thread(target=_browse_thread, daemon=True).start()
+                        last_browse = now
             
             time.sleep(30)
         except KeyboardInterrupt:
