@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-OpenClaw CryptoTask Agent v3 - Full auto-bidding with learning
-Paginate all pages, visit each job, apply with personalized proposals.
-Uses Camfox browser + MiniMax AI + Telegram.
+OpenClaw CryptoTask Agent v4 - Full auto-bidding with learning + keyword fallback
+Key changes:
+- Keyword-based fallback when AI is unavailable
+- Better login retry logic
+- Telegram command handler
+- Continuous watchdog loop
+- Client learning memory
 """
 import subprocess, json, time, re, sys, os
 from datetime import datetime
@@ -11,7 +15,7 @@ from datetime import datetime
 BOT   = "8612653411:AAE_KvNbuxIBeBP_uocTWaN3xlOBpqiva3k"
 CHAT  = "6793940199"
 KEY   = "sk-cp-8r2sLAzHvPzkwS7Z1yjPZWmZpBdP8YvWnQv2iHk6vBmKl4x7Y8eRmJc9nAoXdc"
-BASE  = "https://api.minimaxi.com/v1"   # CORRECT MiniMax endpoint
+BASE  = "https://api.minimaxi.com/v1"
 MODEL = "MiniMax-M2.7"
 CAMFOX = "http://127.0.0.1:9377"
 CT_USER = "rom.godinho@gmail.com"
@@ -22,12 +26,19 @@ AGENT_SID = "rgodim_agent"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORTFOLIO = os.path.join(BASE_DIR, "PORTFOLIO.md")
 CLIENT_PROFILES = os.path.join(BASE_DIR, "CLIENT_PROFILES.md")
-DOCS_DIR = BASE_DIR
+APPLIED_FILE = os.path.join(BASE_DIR, "applied_jobs.json")
+LOG_FILE = os.path.join(BASE_DIR, "agent.log")
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 def log(msg):
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except:
+        pass
 
 def curl(method, url, data=None, timeout=45):
     cmd = ["curl", "-s", "-X", method, "--max-time", str(timeout)]
@@ -38,68 +49,105 @@ def curl(method, url, data=None, timeout=45):
     return r.stdout
 
 def cf(method, path, data=None):
-    """Camfox request."""
     return curl(method, f"{CAMFOX}{path}", data)
 
 def tg(msg):
-    """Send Telegram message."""
     text = msg[:4096]
-    curl("POST", f"https://api.telegram.org/bot{BOT}/sendMessage",
-         {"chat_id": CHAT, "text": text, "parse_mode": "HTML"})
-    log(f"Telegram sent: {text[:80]}...")
+    try:
+        curl("POST", f"https://api.telegram.org/bot{BOT}/sendMessage",
+             {"chat_id": CHAT, "text": text, "parse_mode": "HTML"}, timeout=15)
+    except:
+        log(f"Telegram send failed")
 
 def ai(prompt, max_tokens=600):
-    """Call MiniMax chat API."""
+    """Call MiniMax with fallback to keyword matching."""
     data = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.7
     }
-    resp = curl("POST", f"{BASE}/chat/completions", data)
     try:
+        resp = curl("POST", f"{BASE}/chat/completions", data, timeout=30)
         d = json.loads(resp)
         if "choices" in d and d["choices"]:
             return d["choices"][0]["message"]["content"].strip()
         elif "error" in d:
-            log(f"AI error: {d['error']}")
-            return f"AI_ERROR: {d['error'].get('message', d['error'])}"
-        else:
-            log(f"AI unexpected response: {str(d)[:200]}")
-            return f"AI_ERROR: unknown"
-    except:
-        log(f"AI parse error: {resp[:200]}")
-        return "AI_ERROR: parse failed"
+            log(f"MiniMax error: {d['error'].get('message', d['error'])}")
+            return None
+    except Exception as e:
+        log(f"MiniMax exception: {e}")
+    return None
+
+# ── Keyword fallback matcher ────────────────────────────────────────────────
+INTERESTED = [
+    "web", "backend", "frontend", "python", "node", "javascript", "typescript",
+    "api", "rest", "graphql", "database", "postgresql", "mongodb", "docker",
+    "devops", "cloud", "aws", "gcp", "blockchain", "smart contract", "solidity",
+    "web3", "nft", "ethereum", "bitcoin", "llm", "ai", "machine learning",
+    "fastapi", "flask", "django", "express", "react", "vue", "kubernetes",
+    "ci/cd", "linux", "server", "microservice", "data pipeline", "etl",
+    "scraper", "automation", "script", "integration", "smart-contract",
+    "solidity", "web3.js", "ethers.js", "defi", "dao", "token"
+]
+
+SKIP = [
+    "design", "logo", "graphic", "illustration", "video", "animation",
+    "photoshop", "illustrator", "figma", "ui/ux", "ui design", "ux design",
+    "content writing", "copywriting", "blog post", "article writing",
+    "data entry", "excel", "spreadsheet", "virtual assistant", "seo",
+    "social media", "marketing only", "mobile app only", "ios only", "android only",
+    "swift", "kotlin", "react native", "flutter"
+]
+
+def keyword_score(title, desc=""):
+    """Score 0-10 based on keyword matching."""
+    text = (title + " " + desc).lower()
+    if any(kw in text for kw in SKIP):
+        return 0, "skip: excluded category"
+    matches = [kw for kw in INTERESTED if kw.lower() in text]
+    if not matches:
+        return 0, "no matching skills"
+    score = min(10, 4 + len(matches) * 1.5)
+    return score, f"keywords: {', '.join(matches[:4])}"
+
+def generate_proposal_fallback(job_title, client_name=""):
+    """Generate basic proposal without AI."""
+    return f"""Hello{', ' + client_name if client_name else ''},
+
+I noticed your project "{job_title}" and I'd love to help.
+
+I'm a full-stack developer at RGODIM LTD specializing in backend systems, APIs, blockchain integration, and AI-powered applications. I've built similar projects before and can deliver quality work on time.
+
+What specific requirements do you have? I'm happy to discuss the project in detail and provide a clear timeline.
+
+Best regards,
+RGODIM LTD
+rom.godinho@gmail.com"""
 
 # ── Camfox helpers ──────────────────────────────────────────────────────────
-def camfox_status():
+def camfox_ok():
     try:
-        r = cf("GET", "/")
-        d = json.loads(r)
+        d = json.loads(cf("GET", "/"))
         return d.get("browserRunning") and d.get("browserConnected")
     except:
         return False
 
-def ensure_tab(userId=None, url="https://cryptotask.org/en/tasks", session=None):
-    """Create or reuse a tab for a session."""
+def ensure_tab(url="https://cryptotask.org/en/tasks", session=None):
     sid = session or AGENT_SID
     resp = cf("POST", "/tabs", {"userId": sid, "sessionKey": sid, "url": url})
     d = json.loads(resp)
     tabId = d.get("tabId")
-    if not tabId:
-        log(f"Tab creation failed: {resp}")
-        return None, None
-    time.sleep(6)
+    if tabId:
+        time.sleep(6)
     return tabId, sid
 
 def close_tab(tabId, userId=None):
     if tabId:
-        sid = userId or AGENT_SID
-        cf("DELETE", f"/tabs/{tabId}?userId={sid}")
+        cf("DELETE", f"/tabs/{tabId}?userId={userId or AGENT_SID}")
 
 def get_snapshot(tabId, userId=None, full=True):
-    sid = userId or AGENT_SID
-    snap = cf("GET", f"/tabs/{tabId}/snapshot?userId={sid}&full={str(full).lower()}")
+    snap = cf("GET", f"/tabs/{tabId}/snapshot?userId={userId or AGENT_SID}&full={str(full).lower()}")
     try:
         d = json.loads(snap)
         return d.get("snapshot", ""), d.get("url", "")
@@ -107,90 +155,65 @@ def get_snapshot(tabId, userId=None, full=True):
         return "", ""
 
 def click_ref(tabId, ref, userId=None):
-    sid = userId or AGENT_SID
-    r = cf("POST", f"/tabs/{tabId}/click", {"userId": sid, "ref": ref})
-    return json.loads(r).get("ok", False)
+    r = cf("POST", f"/tabs/{tabId}/click", {"userId": userId or AGENT_SID, "ref": ref})
+    try:
+        return json.loads(r).get("ok", False)
+    except:
+        return False
 
 def type_ref(tabId, ref, text, userId=None):
-    sid = userId or AGENT_SID
-    r = cf("POST", f"/tabs/{tabId}/type", {"userId": sid, "ref": ref, "text": text})
-    return json.loads(r).get("ok", False)
+    r = cf("POST", f"/tabs/{tabId}/type", {"userId": userId or AGENT_SID, "ref": ref, "text": text})
+    try:
+        return json.loads(r).get("ok", False)
+    except:
+        return False
 
 def navigate(tabId, url, userId=None):
-    sid = userId or AGENT_SID
-    r = cf("POST", f"/tabs/{tabId}/navigate", {"userId": sid, "url": url})
+    r = cf("POST", f"/tabs/{tabId}/navigate", {"userId": userId or AGENT_SID, "url": url})
     try:
-        d = json.loads(r)
-        return d.get("ok", False)
+        return json.loads(r).get("ok", False)
     except:
         return False
 
-def wait_page(tabId, userId=None, ms=15000):
-    sid = userId or AGENT_SID
-    r = cf("POST", f"/tabs/{tabId}/wait", {"userId": sid, "timeout": ms})
-    try:
-        return json.loads(r).get("ready", False)
-    except:
-        return False
-
-# ── Extract refs from snapshot ──────────────────────────────────────────────
 def extract_refs(snapshot):
-    """Extract ref ID -> element type from snapshot."""
     refs = {}
-    lines = snapshot.split("\n")
-    for line in lines:
-        m = re.search(r'\[e(\d+)\](?::\s*(\w+))?', line)
-        txt_m = re.search(r'textbox "([^"]+)"', line)
-        btn_m = re.search(r'button "([^"]+)"', line)
-        link_m = re.search(r'link "([^"]+)"', line)
+    for line in snapshot.split("\n"):
+        m = re.search(r'\[e(\d+)\]', line)
         if m:
             idx = int(m.group(1))
-            etype = "textbox" if txt_m else "button" if btn_m else "link" if link_m else "element"
-            refs[idx] = {"type": etype}
-            if txt_m: refs[idx]["label"] = txt_m.group(1)
-            if btn_m: refs[idx]["label"] = btn_m.group(1)
-            if link_m: refs[idx]["label"] = link_m.group(1)
+            for t in ["textbox", "button", "link"]:
+                lm = re.search(rf'{t} "([^"]+)"', line)
+                if lm:
+                    refs[idx] = {"type": t, "label": lm.group(1)}
+                    break
+            else:
+                refs[idx] = {"type": "element", "label": ""}
     return refs
 
-def find_refs(snapshot, pattern, types=None):
-    """Find refs matching pattern in label."""
-    refs = extract_refs(snapshot)
-    results = {}
-    for idx, info in refs.items():
-        label = info.get("label", "").lower()
-        if pattern.lower() in label:
-            if types is None or info["type"] in types:
-                results[idx] = info
-    return results
-
-# ── Job extraction ──────────────────────────────────────────────────────────
 def extract_jobs(snapshot):
-    """Extract job URLs and titles from snapshot."""
     jobs = []
+    seen = set()
     urls = re.findall(r"/url: (/en/tasks/[a-z0-9-]+/\d+)", snapshot)
     headings = re.findall(r'heading "([^"]+)" \[level=\d+\]:', snapshot)
-    budgets = re.findall(r'\$([\d,]+(?:\.\d{2})?)', snapshot)
-    seen = set()
     for i, url in enumerate(urls):
         if url in seen:
             continue
         seen.add(url)
         title = headings[i] if i < len(headings) else "?"
-        budget = f"${budgets[i]}" if i < len(budgets) else "?"
-        jobs.append({"url": f"https://cryptotask.org{url}", "title": title, "budget": budget})
+        jobs.append({"url": f"https://cryptotask.org{url}", "title": title})
     return jobs
 
-# ── Login to CryptoTask ─────────────────────────────────────────────────────
+# ── CryptoTask Login ────────────────────────────────────────────────────────
 def ct_login(tabId):
-    """Login to CryptoTask using typed credentials."""
-    log("Logging into CryptoTask...")
+    """Login via browser form. Returns True if successful."""
+    log("Attempting CryptoTask login...")
     navigate(tabId, "https://cryptotask.org/en/login")
-    time.sleep(6)
+    time.sleep(7)
     
-    snap, _ = get_snapshot(tabId)
+    snap, url = get_snapshot(tabId)
     refs = extract_refs(snap)
     
-    # Find email and password refs
+    # Find form fields
     email_ref = pass_ref = submit_ref = None
     for idx, info in refs.items():
         label = info.get("label", "").lower()
@@ -198,109 +221,62 @@ def ct_login(tabId):
             email_ref = f"e{idx}"
         elif "password" in label and info["type"] == "textbox":
             pass_ref = f"e{idx}"
-        elif info["type"] == "button" and ("login" in label or "submit" in label):
+        elif info["type"] == "button" and ("login" in label or "submit" in label or "sign in" in label):
             submit_ref = f"e{idx}"
     
     if not email_ref or not pass_ref:
-        log(f"Could not find form fields. Refs: {refs}")
+        log(f"Cannot find login form. Available refs: {dict(list(refs.items())[:10])}")
         return False
     
-    if submit_ref:
-        type_ref(tabId, email_ref, CT_USER)
-        time.sleep(1)
-        type_ref(tabId, pass_ref, CT_PASS)
-        time.sleep(1)
-        click_ref(tabId, submit_ref)
-    else:
-        type_ref(tabId, email_ref, CT_USER)
-        time.sleep(0.5)
-        click_ref(tabId, email_ref)  # Move to next field
-        time.sleep(0.5)
-        type_ref(tabId, pass_ref, CT_PASS)
-        time.sleep(0.5)
-        # Try pressing Enter
-        cf("POST", f"/tabs/{tabId}/press", {"userId": AGENT_SID, "key": "Enter"})
+    if not submit_ref:
+        submit_ref = email_ref  # Try clicking email field as fallback
     
-    time.sleep(8)
+    log(f"Login fields: email={email_ref}, pass={pass_ref}, submit={submit_ref}")
     
-    # Check if logged in
+    # Type credentials
+    type_ref(tabId, email_ref, CT_USER)
+    time.sleep(0.5)
+    type_ref(tabId, pass_ref, CT_PASS)
+    time.sleep(0.5)
+    
+    # Click submit
+    click_ref(tabId, submit_ref)
+    time.sleep(10)
+    
+    # Check result
     snap2, url2 = get_snapshot(tabId)
-    if "/en/login" in url2 or ("email" in snap2.lower() and "password" in snap2.lower() and "login" in snap2.lower()):
+    if "/en/login" in url2:
         log("Login FAILED - still on login page")
         return False
     
-    log("Login SUCCESS!")
+    log(f"Login SUCCESS - now at: {url2}")
     return True
 
 # ── Proposal generation ──────────────────────────────────────────────────────
-def generate_proposal(job_title, job_desc, budget, client_name, tone="professional"):
-    """Generate a personalized proposal using AI."""
-    
-    # Load portfolio for context
-    portfolio = ""
-    if os.path.exists(PORTFOLIO):
-        with open(PORTFOLIO) as f:
-            portfolio = f.read()[:2000]
-    
-    tone_guidance = {
-        "professional": "Be professional and concise. 3-4 short paragraphs max.",
-        "startup": "Be direct, outcome-focused. Mention speed and MVP approach.",
-        "web3": "Casual-technical, show blockchain fluency. Use crypto-native language.",
-        "enterprise": "Formal, structured, milestone-based approach. Use professional tone.",
-        "friendly": "Warm, approachable, show genuine interest. Be conversational."
-    }
-    
-    guidance = tone_guidance.get(tone, tone_guidance["professional"])
-    
-    prompt = f"""You are a developer at RGODIM LTD writing a proposal for a freelance job.
+def generate_proposal(job_title, job_desc, budget, client_name):
+    """Generate proposal with AI, fallback to keyword template."""
+    prompt = f"""You are RGODIM LTD writing a freelance proposal.
 
-COMPANY PROFILE:
-{portfolio}
-
-JOB:
-Title: {job_title}
+Job: {job_title}
 Budget: {budget}
 Client: {client_name}
-Description excerpt: {job_desc[:1500]}
+Description: {job_desc[:800]}
 
-TASK:
-Write a compelling proposal message (150-300 words) to apply for this job.
-
-TONE: {guidance}
-
-REQUIREMENTS:
-- Start with genuine greeting addressing client's needs
-- Mention relevant skills/experience from portfolio
-- Be specific about what you'll deliver
-- Show understanding of their project
-- End with clear next step
-- NEVER be arrogant, never lie about experience
-- NEVER use placeholders like "I can start immediately" without saying when
-- NEVER promise things you can't deliver
-
-Output ONLY the proposal text, no intro or explanation."""
+Write a 150-250 word proposal. Be professional, specific, show relevant skills.
+Output ONLY the proposal text."""
     
-    result = ai(prompt, 400)
-    if result.startswith("AI_ERROR:"):
-        # Fallback proposal
-        return f"""Hello,
+    result = ai(prompt, 350)
+    if result:
+        return result
+    
+    log("Using fallback proposal (AI unavailable)")
+    return generate_proposal_fallback(job_title, client_name)
 
-I noticed your project and believe I can deliver exactly what you need.
-
-I have extensive experience in similar projects and can start immediately.
-
-Please share more details so we can discuss specifics.
-
-Best regards,
-RGODIM LTD"""
-    return result
-
-# ── Job application ──────────────────────────────────────────────────────────
+# ── Apply to job ────────────────────────────────────────────────────────────
 def apply_to_job(tabId, job_url, job_title, budget):
     """Navigate to job and apply."""
     log(f"Applying to: {job_title}")
     
-    # Navigate to job
     navigate(tabId, job_url)
     time.sleep(8)
     
@@ -309,7 +285,6 @@ def apply_to_job(tabId, job_url, job_title, budget):
     
     # Check if logged in
     if "/en/login" in snap.lower() and "apply" in snap.lower():
-        log("Not logged in - attempting login...")
         if not ct_login(tabId):
             return False, "Login failed"
         snap, _ = get_snapshot(tabId)
@@ -318,183 +293,97 @@ def apply_to_job(tabId, job_url, job_title, budget):
     # Find Apply button
     apply_ref = None
     for idx, info in refs.items():
-        label = info.get("label", "").lower()
-        if "apply" in label and info["type"] == "button":
+        if info["type"] in ("button", "link") and "apply" in info.get("label", "").lower():
             apply_ref = f"e{idx}"
             break
     
     if not apply_ref:
-        # Try to find it as a link
-        for idx, info in refs.items():
-            label = info.get("label", "").lower()
-            if "apply" in label and info["type"] == "link":
-                apply_ref = f"e{idx}"
-                break
-    
-    if not apply_ref:
-        # Try clicking any visible apply text
-        clickable = find_refs(snap, "apply", types=["button", "link"])
-        if clickable:
-            apply_ref = f"e{list(clickable.keys())[0]}"
-    
-    if not apply_ref:
         return False, "No Apply button found"
     
-    log(f"Clicking apply button: {apply_ref}")
+    log(f"Clicking Apply: {apply_ref}")
     click_ref(tabId, apply_ref)
     time.sleep(5)
     
     snap2, _ = get_snapshot(tabId)
+    refs2 = extract_refs(snap2)
     
-    # Look for proposal text area
-    textareas = find_refs(snap2, "", types=["textbox", "textarea"])
-    submit_ref = None
+    # Extract client name
+    client_name = ""
+    cm = re.search(r'link "([^"]+)" \[e\d+\]:\s*/url: /en/clients/', snap)
+    if cm:
+        client_name = cm.group(1)
     
-    # Find submit button
-    for idx, info in refs.items():
-        label = info.get("label", "").lower()
-        if info["type"] == "button" and ("submit" in label or "send" in label or "apply" in label or "confirm" in label):
-            submit_ref = f"e{idx}"
+    # Find textarea for proposal
+    textarea_ref = None
+    for idx, info in refs2.items():
+        if info["type"] in ("textbox", "textarea") or "textbox" in info.get("label", "").lower():
+            textarea_ref = f"e{idx}"
             break
     
-    # Extract client name from job page
-    client_m = re.search(r'link "([^"]+)" \[e\d+\]:\s*/url: /en/clients/', snap)
-    client_name = client_m.group(1) if client_m else "there"
-    
-    # Extract job description
-    desc_start = snap.find("Job details")
-    job_desc = snap[desc_start:desc_start+2000] if desc_start > 0 else snap[:2000]
-    
     # Generate proposal
-    proposal = generate_proposal(job_title, job_desc, budget, client_name)
+    proposal = generate_proposal(job_title, snap[:1500], budget, client_name)
     
-    # Type proposal if textarea found
-    if textareas:
-        textarea_ref = f"e{list(textareas.keys())[0]}"
-        log(f"Typing proposal into {textarea_ref} ({len(proposal)} chars)")
+    if textarea_ref:
+        log(f"Typing proposal into {textarea_ref}")
         type_ref(tabId, textarea_ref, proposal)
         time.sleep(2)
     
-    # Click submit
+    # Find submit button
+    submit_ref = None
+    for idx, info in refs2.items():
+        label = info.get("label", "").lower()
+        if info["type"] == "button" and any(k in label for k in ["submit", "send", "apply", "confirm", "post"]):
+            submit_ref = f"e{idx}"
+            break
+    
     if submit_ref:
-        log(f"Submitting with {submit_ref}")
+        log(f"Submitting: {submit_ref}")
         click_ref(tabId, submit_ref)
         time.sleep(5)
     else:
-        log("No submit button found - may have submitted already or need more steps")
-        return False, "No submit button found"
+        log("No submit button found")
+        return False, "No submit button"
     
-    # Check result
+    # Verify
     snap3, _ = get_snapshot(tabId)
-    if "applied" in snap3.lower() or "success" in snap3.lower() or "submitted" in snap3.lower():
+    if any(w in snap3.lower() for w in ["applied", "success", "submitted", "thank you"]):
         return True, proposal[:100]
     
     return True, "Applied (confirmation unclear)"
 
-# ── Job matching ─────────────────────────────────────────────────────────────
-SERVICE_KEYWORDS = [
-    "web", "backend", "frontend", "python", "node", "javascript", "typescript",
-    "api", "rest", "graphql", "database", "postgresql", "mongodb", "docker",
-    "devops", "cloud", "aws", "gcp", "blockchain", "smart contract", "solidity",
-    "web3", "nft", "ethereum", "bitcoin", "llm", "ai", "machine learning",
-    "fastapi", "flask", "django", "express", "react", "vue", "kubernetes",
-    "ci/cd", "linux", "server", "microservice", "data pipeline", "etl",
-    "scraper", "automation", "script", "integration"
-]
-
-SKIP_KEYWORDS = [
-    "design", "logo", "graphic", "illustration", "video", "animation",
-    "photoshop", "illustrator", "figma", "ui/ux", "ui design", "ux design",
-    "content writing", "copywriting", "blog post", "article writing",
-    "data entry", "excel", "spreadsheet", "virtual assistant",
-    "seo specialist", "social media", "marketing only", "mobile app only",
-    "ios only", "android only", "swift", "kotlin"
-]
-
-def is_interested(title, desc=""):
-    """Check if job matches our services."""
-    text = (title + " " + desc).lower()
-    
-    # Explicit skips
-    for kw in SKIP_KEYWORDS:
-        if kw.lower() in text:
-            return False, f"Explicit skip: contains '{kw}'"
-    
-    # Check for interested keywords
-    matches = [kw for kw in SERVICE_KEYWORDS if kw.lower() in text]
-    if matches:
-        return True, f"Match: {', '.join(matches[:3])}"
-    
-    # Default: interested if it could be dev-related
-    if any(w in text for w in ["develop", "build", "project", "app", "platform", "system"]):
-        return True, "Potential dev project"
-    
-    return False, "No relevant skills found"
-
-def rate_job_ai(title, desc, budget):
-    """Rate job fit 0-10 using AI with learned client preferences."""
-    prompt = f"""Rate this freelance job fit for RGODIM LTD.
-
-Company: RGODIM LTD - Web Development, Backend (Python/Node), API Development, AI/LLM Integration, Blockchain, DevOps
-
-Job Title: {title}
-Budget: {budget}
-Description: {desc[:800]}
-
-Score 0-10 and give one line reason.
-Format: SCORE: X/10 | REASON: ...
-Only output the score line."""
-    
-    result = ai(prompt, 80)
-    try:
-        if "SCORE:" in result:
-            score_line = result.split("SCORE:")[1].split("|")[0].strip()
-            score = int(score_line.split("/")[0])
-            reason = result.split("REASON:")[1].strip() if "REASON:" in result else result[:80]
-            return score, reason
-        return 5, result[:80]
-    except:
-        return 5, result[:80] if result else "parse error"
-
-# ── Scan all pages ──────────────────────────────────────────────────────────
+# ── Scan jobs ───────────────────────────────────────────────────────────────
 def scan_all_pages(tabId, max_pages=10):
-    """Scan multiple pages, collect all job links."""
+    """Scan multiple pages."""
     all_jobs = []
     seen = set()
-    page = 1
     
-    tg(f"🔍 Starting full job scan...\nScanning up to {max_pages} pages")
-    log(f"Starting scan, max_pages={max_pages}")
+    tg("🔍 Scanning cryptotask.org jobs...")
     
-    while page <= max_pages:
+    for page in range(1, max_pages + 1):
         url = "https://cryptotask.org/en/tasks" if page == 1 else f"https://cryptotask.org/en/tasks?page={page}"
-        log(f"=== Page {page}: {url} ===")
+        log(f"Page {page}: {url}")
         
         navigate(tabId, url)
         time.sleep(8)
         
         snap, _ = get_snapshot(tabId)
         if not snap or len(snap) < 200:
-            log(f"Page {page}: empty/failed")
+            log(f"Page {page}: empty")
             break
         
         jobs = extract_jobs(snap)
-        log(f"Page {page}: {len(jobs)} jobs, {len(snap)} chars snapshot")
+        log(f"Page {page}: {len(jobs)} jobs")
         
         new = 0
         for job in jobs:
             if job["url"] not in seen:
                 seen.add(job["url"])
-                job["page"] = page
                 all_jobs.append(job)
                 new += 1
         
-        log(f"Page {page}: {new} new jobs")
-        
-        if not jobs or len(jobs) < 5:
+        if len(jobs) < 5:
             break
         
-        page += 1
         time.sleep(3)
     
     log(f"Total unique jobs: {len(all_jobs)}")
@@ -502,7 +391,7 @@ def scan_all_pages(tabId, max_pages=10):
 
 # ── Process jobs ─────────────────────────────────────────────────────────────
 def process_jobs(tabId, jobs):
-    """Visit each job, apply to matches."""
+    """Evaluate and apply to matching jobs."""
     total = len(jobs)
     applied = []
     skipped = []
@@ -514,237 +403,280 @@ def process_jobs(tabId, jobs):
         idx = i + 1
         title = job["title"]
         url = job["url"]
-        budget = job.get("budget", "?")
         
         log(f"[{idx}/{total}] {title[:60]}")
         
-        # Quick title check
-        interested, reason = is_interested(title)
-        if not interested:
-            log(f"  SKIP (title): {reason}")
+        # Score with fallback
+        score, reason = keyword_score(title)
+        if score == 0:
+            log(f"  SKIP: {reason}")
             skipped.append({"title": title, "url": url, "reason": reason})
             continue
         
-        # Navigate to job page
-        navigate(tabId, url)
-        time.sleep(8)
-        snap, _ = get_snapshot(tabId)
+        # AI scoring if available
+        ai_score = None
+        ai_reason = None
         
-        if not snap or len(snap) < 200:
-            log(f"  ERROR: Could not load job page")
-            errors.append({"title": title, "url": url, "reason": "load failed"})
-            continue
-        
-        # Check if job is still accepting applications
-        if "accepting applications" not in snap.lower() and "open" not in snap.lower():
-            if "filled" in snap.lower() or "closed" in snap.lower():
-                log(f"  SKIP: Job filled/closed")
-                skipped.append({"title": title, "url": url, "reason": "filled/closed"})
-                continue
-        
-        # AI rating
-        score, ai_reason = rate_job_ai(title, snap[:2000], budget)
-        log(f"  Score: {score}/10 - {ai_reason[:60]}")
+        # Try AI rating
+        ai_result = ai(f"Score 0-10 fit for RGODIM LTD (web dev, backend, blockchain, Python, API, AI). Job: {title[:100]}. Reply SCORE:X|REASON:...", 60)
+        if ai_result and "SCORE:" in ai_result:
+            try:
+                ai_score = int(ai_result.split("SCORE:")[1].split("|")[0].strip())
+                ai_reason = ai_result.split("REASON:")[1].strip() if "REASON:" in ai_result else ""
+                score = (score + ai_score) / 2
+                reason = f"{reason} | AI: {ai_reason[:40]}"
+                log(f"  Score: {score:.1f}/10 (AI: {ai_reason[:60]})")
+            except:
+                log(f"  Score: {score}/10 ({reason})")
+        else:
+            log(f"  Score: {score}/10 ({reason})")
         
         if score < 4:
-            log(f"  SKIP (score {score})")
-            skipped.append({"title": title, "url": url, "reason": f"score {score} - {ai_reason}"})
+            log(f"  SKIP (low score)")
+            skipped.append({"title": title, "url": url, "reason": f"score {score}"})
             continue
         
-        # Apply!
-        success, msg = apply_to_job(tabId, url, title, budget)
+        # Apply
+        success, msg = apply_to_job(tabId, url, title, job.get("budget", "?"))
         
         if success:
-            log(f"  ✅ APPLIED: {msg[:80]}")
-            applied.append({"title": title, "url": url, "budget": budget, "score": score})
-            tg(f"✅ <b>Applied to:</b>\n{title}\nBudget: {budget}\nScore: {score}/10\n\nProposal:\n{msg[:300]}...")
+            applied.append({"title": title, "url": url, "score": round(score, 1)})
+            tg(f"✅ <b>Applied:</b> {title}\nScore: {score:.0f}/10\n\n{message_preview(msg)}")
+            log(f"  APPLIED: {msg[:80]}")
+            learn_client_interaction(title, "Applied", msg)
         else:
-            log(f"  ❌ Could not apply: {msg}")
             errors.append({"title": title, "url": url, "reason": msg})
-            tg(f"❌ <b>Could not apply:</b>\n{title}\n{msg}")
+            tg(f"❌ <b>Error applying:</b> {title}\n{msg}")
+            log(f"  ERROR: {msg}")
         
+        # Save applied
+        save_applied(job, score, msg)
         time.sleep(5)
     
     return applied, skipped, errors
 
-# ── Learn from interaction ───────────────────────────────────────────────────
-def learn_from_client(client_name, job_title, outcome, proposal_preview):
-    """Save client interaction to memory for future tone adjustment."""
-    entry = f"""
+def message_preview(msg):
+    if not msg:
+        return ""
+    return msg[:200] + "..." if len(msg) > 200 else msg
+
+def save_applied(job, score, proposal):
+    """Save applied job to file."""
+    try:
+        entry = {"time": datetime.now().isoformat(), "title": job["title"], "url": job["url"], "score": score}
+        with open(APPLIED_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except:
+        pass
+
+def learn_client_interaction(job_title, outcome, proposal_preview):
+    """Save client interaction for learning."""
+    try:
+        entry = f"""
 ### {datetime.now().strftime('%Y-%m-%d %H:%M')}
-**Client**: {client_name}
 **Job**: {job_title}
 **Outcome**: {outcome}
-**Proposal Preview**: {proposal_preview[:200]}
+**Preview**: {proposal_preview[:200]}
 """
-    
-    try:
         with open(CLIENT_PROFILES, "a") as f:
             f.write(entry)
-        log(f"Learned from client interaction: {client_name}")
-    except Exception as e:
-        log(f"Could not save client profile: {e}")
+    except:
+        pass
 
-# ── Main actions ──────────────────────────────────────────────────────────────
-def action_status():
-    log("Status check...")
-    camfox_ok = camfox_status()
-    tg(f"🤖 RGODIM LTD Agent Status\n"
-       f"Camfox: {'✅ Running' if camfox_ok else '❌ Down'}\n"
-       f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-       f"Mode: Autonomous Job Scanner")
-    log(f"Status: Camfox={'OK' if camfox_ok else 'FAIL'}")
-
-def action_browse():
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    log(f"=== FULL JOB SCAN STARTED {ts} ===")
+# ── Telegram command handler ─────────────────────────────────────────────────
+def handle_command(cmd, args):
+    """Handle Telegram bot commands."""
+    if cmd == "status":
+        camfox_ok_val = camfox_ok()
+        try:
+            with open(LOG_FILE) as f:
+                last = f.readlines()[-5:]
+            last_lines = "".join(last)
+        except:
+            last_lines = "No log"
+        
+        tg(f"🤖 RGODIM LTD Agent\n"
+           f"Camfox: {'✅ Running' if camfox_ok_val else '❌ Down'}\n"
+           f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+           f"Commands: /browse /apply <url> /applied /portfolio\n\n"
+           f"Recent log:\n{last_lines[:500]}")
     
-    camfox_ok = camfox_status()
-    if not camfox_ok:
-        tg("❌ Camfox browser is down. Cannot scan.")
-        log("Camfox not running")
+    elif cmd == "browse":
+        tg("🚀 Starting job scan...")
+        action_browse()
+    
+    elif cmd == "apply":
+        if not args:
+            tg("Usage: /apply <job_url>")
+        else:
+            tg(f"🎯 Applying to:\n{args}")
+            action_apply(args)
+    
+    elif cmd == "applied":
+        try:
+            with open(APPLIED_FILE) as f:
+                lines = f.readlines()[-10:]
+            if lines:
+                msg = "📝 <b>Recent Applications:</b>\n\n"
+                for line in lines:
+                    job = json.loads(line)
+                    msg += f"• {job['title']}\n  Score: {job.get('score','?')}/10\n  {job['url']}\n\n"
+                tg(msg[:4096])
+            else:
+                tg("No applications yet.")
+        except:
+            tg("No applications file yet.")
+    
+    elif cmd == "portfolio":
+        if os.path.exists(PORTFOLIO):
+            with open(PORTFOLIO) as f:
+                tg("📁 <b>RGODIM LTD Portfolio</b>\n\n" + f.read()[:4000])
+        else:
+            tg("Portfolio file not found.")
+    
+    elif cmd == "help":
+        tg("Commands:\n/status - Agent status\n/browse - Scan & apply to jobs\n/apply <url> - Apply to specific job\n/applied - Recent applications\n/portfolio - View portfolio")
+    
+    else:
+        tg(f"Unknown command: {cmd}\nCommands: /status, /browse, /apply <url>, /applied, /portfolio, /help")
+
+# ── Main actions ────────────────────────────────────────────────────────────
+def action_browse():
+    if not camfox_ok():
+        tg("❌ Camfox is not running.")
         return
     
-    # Create dedicated tab for scanning
-    tabId, sid = ensure_tab(session=f"scan_{int(time.time())}")
+    tabId, sid = ensure_tab(session=f"browse_{int(time.time())}")
     if not tabId:
-        tg("❌ Could not create browser tab.")
+        tg("❌ Cannot create browser tab.")
         return
     
     try:
-        # Login first
-        if not ct_login(tabId):
-            tg("⚠️ Login failed. Trying to scan anyway...")
+        # Try login (ignore failure if already logged in)
+        ct_login(tabId)
         
-        # Scan all pages
         jobs = scan_all_pages(tabId, max_pages=10)
-        
         if not jobs:
             tg("❌ No jobs found.")
             return
         
-        tg(f"📦 Found {len(jobs)} jobs. Processing...")
-        
-        # Process each job
         applied, skipped, errors = process_jobs(tabId, jobs)
         
-        # Summary
-        summary = f"""
-📊 <b>Scan Complete!</b>
-
-Jobs found: {len(jobs)}
-✅ Applied: {len(applied)}
-⏭️ Skipped: {len(skipped)}
-❌ Errors: {len(errors)}
-
-Time: {datetime.now().strftime('%H:%M:%S')}
-"""
+        summary = (f"📊 <b>Scan Complete</b>\n"
+                   f"Found: {len(jobs)}\n"
+                   f"Applied: {len(applied)}\n"
+                   f"Skipped: {len(skipped)}\n"
+                   f"Errors: {len(errors)}\n"
+                   f"Time: {datetime.now().strftime('%H:%M')}")
         tg(summary)
-        log(f"=== SCAN COMPLETE: {len(applied)} applied, {len(skipped)} skipped, {len(errors)} errors ===")
-        
-        # Save applied jobs
-        if applied:
-            try:
-                with open(os.path.join(DOCS_DIR, "applied_jobs.json"), "a") as f:
-                    for a in applied:
-                        f.write(json.dumps({"time": ts, **a}) + "\n")
-            except:
-                pass
-        
+        log(f"Browse complete: {len(applied)} applied, {len(skipped)} skipped, {len(errors)} errors")
     finally:
         close_tab(tabId)
 
 def action_apply(job_url):
-    """Apply to a specific job URL."""
-    log(f"Apply to specific job: {job_url}")
-    tg(f"🎯 Applying to:\n{job_url}")
-    
-    camfox_ok = camfox_status()
-    if not camfox_ok:
-        tg("❌ Camfox browser is down.")
+    if not camfox_ok():
+        tg("❌ Camfox is not running.")
         return
     
     tabId, sid = ensure_tab(session=f"apply_{int(time.time())}", url=job_url)
     if not tabId:
-        tg("❌ Could not create browser tab.")
+        tg("❌ Cannot create browser tab.")
         return
     
     try:
-        if not ct_login(tabId):
-            tg("⚠️ Login failed.")
-        
-        # Get job title
+        ct_login(tabId)
         time.sleep(8)
         snap, _ = get_snapshot(tabId)
+        
         title_m = re.search(r'heading "([^"]+)" \[level=1\]:', snap)
         title = title_m.group(1) if title_m else "Unknown Job"
         
-        budget_m = re.search(r'\$[\d,]+(?:\.\d{2})?\s*(?:per month|per hour|per project)?', snap)
+        budget_m = re.search(r'\$[\d,]+(?:\.\d{2})?', snap)
         budget = budget_m.group() if budget_m else "?"
+        
+        score, reason = keyword_score(title, snap[:1000])
         
         success, msg = apply_to_job(tabId, job_url, title, budget)
         
         if success:
-            tg(f"✅ <b>Applied to:</b>\n{title}\nBudget: {budget}\n\nProposal:\n{msg[:400]}...")
-            learn_from_client("Direct Apply", title, "Applied", msg)
+            tg(f"✅ <b>Applied:</b> {title}\nBudget: {budget}\nScore: {score:.0f}/10\n\n{message_preview(msg)}")
+            save_applied({"title": title, "url": job_url}, score, msg)
+            learn_client_interaction(title, "Applied", msg)
         else:
-            tg(f"❌ Could not apply:\n{title}\n{msg}")
-        
+            tg(f"❌ <b>Failed:</b> {title}\n{msg}")
     finally:
         close_tab(tabId)
 
-def action_portfolio():
-    """Send portfolio via Telegram."""
-    if os.path.exists(PORTFOLIO):
-        with open(PORTFOLIO) as f:
-            content = f.read()
-        tg(f"📁 <b>RGODIM LTD Portfolio</b>\n\n{content[:4000]}")
-    else:
-        tg("Portfolio file not found.")
+def check_telegram_commands():
+    """Poll Telegram for new commands."""
+    try:
+        updates = curl("GET", f"https://api.telegram.org/bot{BOT}/getUpdates?timeout=1&offset=-1", timeout=5)
+        d = json.loads(updates)
+        if d.get("ok") and d.get("result"):
+            for item in d["result"]:
+                msg = item.get("message", {})
+                text = msg.get("text", "")
+                chat_id = msg.get("chat", {}).get("id")
+                if text and chat_id == int(CHAT) and text.startswith("/"):
+                    parts = text[1:].split(" ", 1)
+                    cmd = parts[0].lower()
+                    args = parts[1] if len(parts) > 1 else ""
+                    log(f"Telegram command: {cmd} {args}")
+                    handle_command(cmd, args)
+    except:
+        pass
 
-def action_applied():
-    """Show recent applications."""
-    applied_file = os.path.join(DOCS_DIR, "applied_jobs.json")
-    if os.path.exists(applied_file):
-        with open(applied_file) as f:
-            lines = f.readlines()[-10:]
-        if lines:
-            msg = "📝 <b>Recent Applications:</b>\n\n"
-            for line in lines:
-                try:
-                    job = json.loads(line)
-                    msg += f"• {job['title']}\n  Budget: {job.get('budget','?')} Score: {job.get('score','?')}/10\n  {job['url']}\n\n"
-                except:
-                    pass
-            tg(msg[:4096])
-        else:
-            tg("No applications yet.")
-    else:
-        tg("No applications file yet.")
+# ── Watchdog loop ───────────────────────────────────────────────────────────
+def watchdog_loop():
+    """Continuous loop: check commands + keep system alive."""
+    log("Watchdog loop starting...")
+    tg("🤖 RGODIM LTD Agent watchdog started")
+    
+    last_browse = 0
+    browse_interval = 4 * 3600  # 4 hours
+    
+    while True:
+        try:
+            # Check Telegram commands
+            check_telegram_commands()
+            
+            # Periodic browse
+            now = time.time()
+            if now - last_browse > browse_interval:
+                log("Triggering periodic browse...")
+                tg("🔄 Periodic job scan triggered")
+                action_browse()
+                last_browse = now
+            
+            time.sleep(30)  # Check every 30 seconds
+            
+        except KeyboardInterrupt:
+            log("Watchdog stopped by user")
+            break
+        except Exception as e:
+            log(f"Watchdog error: {e}")
+            time.sleep(60)
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     arg = sys.argv[2] if len(sys.argv) > 2 else ""
     
-    log(f"Action: {action} {arg}")
-    
-    if action == "status":
-        action_status()
-    elif action == "browse":
+    if cmd == "watchdog":
+        watchdog_loop()
+    elif cmd == "browse":
         action_browse()
-    elif action == "apply":
+    elif cmd == "apply":
         if not arg:
-            tg("Usage: apply <job_url>")
+            print("Usage: apply <job_url>")
         else:
             action_apply(arg)
-    elif action == "portfolio":
-        action_portfolio()
-    elif action == "applied":
-        action_applied()
+    elif cmd == "status":
+        handle_command("status", "")
+    elif cmd == "telegram-poll":
+        check_telegram_commands()
     else:
-        tg(f"Unknown action: {action}\nCommands: status, browse, apply <url>, portfolio, applied")
+        print(f"Commands: status, browse, apply <url>, watchdog, telegram-poll")
 
 if __name__ == "__main__":
     main()
